@@ -10,21 +10,6 @@ import (
 	"github.com/arunbluez/claw-migrate/internal/config"
 )
 
-// WorkspaceFiles are the top-level markdown files to migrate
-var WorkspaceFiles = []string{
-	"SOUL.md",
-	"IDENTITY.md",
-	"AGENTS.md",
-	"USER.md",
-	"TOOLS.md",
-	"HEARTBEAT.md",
-}
-
-// SubDirs are workspace subdirectories to migrate
-var SubDirs = []string{
-	"memory",
-	"skills",
-}
 
 // FileResult tracks the migration result for a single file
 type FileResult struct {
@@ -48,56 +33,67 @@ type Result struct {
 	Errors       int
 }
 
-// MigrateWorkspace copies workspace files from OpenClaw to PicoClaw
+// SkipEntries are items we never migrate
+var SkipEntries = map[string]bool{
+	".git":       true,
+	".openclaw":  true,
+	".DS_Store":  true,
+	".gitignore": true,
+	"sessions":   true, // incompatible format
+}
+
+// MigrateWorkspace copies the ENTIRE workspace from OpenClaw to PicoClaw
+// including all files, custom directories, project folders, etc.
 func MigrateWorkspace(srcWorkspace, dstWorkspace string, force bool) Result {
 	result := Result{}
 
-	// Ensure destination directories exist
-	for _, dir := range append(SubDirs, "sessions", "state", "cron") {
-		os.MkdirAll(filepath.Join(dstWorkspace, dir), 0755)
+	// Ensure destination exists
+	os.MkdirAll(dstWorkspace, 0755)
+
+	// Scan source workspace and migrate everything
+	entries, err := os.ReadDir(srcWorkspace)
+	if err != nil {
+		return result
 	}
 
-	// Migrate top-level workspace files
-	for _, file := range WorkspaceFiles {
-		srcPath := filepath.Join(srcWorkspace, file)
-		dstPath := filepath.Join(dstWorkspace, file)
-		fr := migrateFile(srcPath, dstPath, file, force)
-		result.Files = append(result.Files, fr)
-		result.TotalFiles++
-		if fr.Migrated {
-			result.Migrated++
-		} else if fr.Skipped {
-			result.Skipped++
-		} else if fr.Error != nil {
-			result.Errors++
+	for _, entry := range entries {
+		name := entry.Name()
+
+		// Skip certain entries
+		if SkipEntries[name] {
+			continue
 		}
-	}
 
-	// Migrate memory directory
-	memResults := migrateDirectory(
-		filepath.Join(srcWorkspace, "memory"),
-		filepath.Join(dstWorkspace, "memory"),
-		force,
-	)
-	for _, fr := range memResults {
-		result.Files = append(result.Files, fr)
-		result.TotalFiles++
-		if fr.Migrated {
-			result.Migrated++
-		}
-	}
+		srcPath := filepath.Join(srcWorkspace, name)
+		dstPath := filepath.Join(dstWorkspace, name)
 
-	// Migrate skills directory
-	skillResults := migrateDirectory(
-		filepath.Join(srcWorkspace, "skills"),
-		filepath.Join(dstWorkspace, "skills"),
-		force,
-	)
-	for _, fr := range skillResults {
-		result.Files = append(result.Files, fr)
-		result.TotalFiles++
-		if fr.Migrated {
-			result.Migrated++
+		if entry.IsDir() {
+			// Migrate entire directory recursively
+			os.MkdirAll(dstPath, 0755)
+			dirResults := migrateDirectory(srcPath, dstPath, force)
+			for _, fr := range dirResults {
+				result.Files = append(result.Files, fr)
+				result.TotalFiles++
+				if fr.Migrated {
+					result.Migrated++
+				} else if fr.Skipped {
+					result.Skipped++
+				} else if fr.Error != nil {
+					result.Errors++
+				}
+			}
+		} else {
+			// Migrate file
+			fr := migrateFile(srcPath, dstPath, name, force)
+			result.Files = append(result.Files, fr)
+			result.TotalFiles++
+			if fr.Migrated {
+				result.Migrated++
+			} else if fr.Skipped {
+				result.Skipped++
+			} else if fr.Error != nil {
+				result.Errors++
+			}
 		}
 	}
 

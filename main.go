@@ -123,46 +123,120 @@ func showDetectionResults(oc, pc detect.Installation, sys detect.SystemInfo) {
 	}
 
 	// Show config details
+	ui.Step(3, "Configuration")
 	if oc.Config != nil {
-		providers := detect.GetProviderKeys(oc.Config)
-		channels := detect.GetConfiguredChannels(oc.Config)
-		mcpServers := detect.GetMCPServers(oc.Config)
+		ui.Found("Config file", fmt.Sprintf("%s (%s)", oc.ConfigPath, detect.FormatSize(oc.ConfigSummary.ConfigFileSize)))
 
+		// Model & agent settings
+		if oc.ConfigSummary.DefaultModel != "" {
+			ui.Found("Default model", oc.ConfigSummary.DefaultModel)
+		}
+		if oc.ConfigSummary.MaxTokens > 0 {
+			ui.Found("Max tokens", fmt.Sprintf("%d", oc.ConfigSummary.MaxTokens))
+		}
+
+		// Providers
+		providers := detect.GetProviderKeys(oc.Config)
 		if len(providers) > 0 {
 			ui.Found("Providers", strings.Join(providers, ", "))
 		}
+
+		// Channels
+		channels := detect.GetConfiguredChannels(oc.Config)
 		if len(channels) > 0 {
 			ui.Found("Channels", strings.Join(channels, ", "))
 		}
+
+		// MCP servers
+		mcpServers := detect.GetMCPServers(oc.Config)
 		if len(mcpServers) > 0 {
 			ui.Found("MCP Servers", strings.Join(mcpServers, ", "))
 		}
+
+		// Heartbeat
+		if oc.ConfigSummary.HeartbeatEnabled {
+			ui.Found("Heartbeat", fmt.Sprintf("enabled (every %d min)", oc.ConfigSummary.HeartbeatInterval))
+		}
+	} else {
+		ui.NotFound("Config file")
 	}
 
-	// Show workspace files
-	ui.Step(3, "OpenClaw workspace files")
-	allFiles := []string{"SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md", "TOOLS.md", "HEARTBEAT.md"}
-	for _, f := range allFiles {
+	// Show workspace — standard agent files
+	ui.Step(4, "Workspace — agent files")
+	standardFileList := []string{"SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md", "TOOLS.md", "HEARTBEAT.md"}
+	foundCount := 0
+	for _, f := range standardFileList {
 		exists := oc.WorkspaceFiles[f]
 		lines := 0
 		if exists {
 			lines = detect.CountFileLines(filepath.Join(oc.WorkspaceDir, f))
+			foundCount++
 		}
 		ui.FileStatus(f, exists, lines)
 	}
 
-	if oc.HasMemory {
-		ui.Found("memory/", "contains files")
-	}
-	if oc.HasSkills {
-		ui.Found("skills/", "contains files")
-	}
-	if oc.HasCron {
-		ui.Found("cron/", "contains jobs")
+	// Show extra files (non-standard .md files and other files)
+	if len(oc.ExtraFiles) > 0 {
+		ui.Step(5, fmt.Sprintf("Workspace — custom files (%d)", len(oc.ExtraFiles)))
+		for _, f := range oc.ExtraFiles {
+			lines := detect.CountFileLines(filepath.Join(oc.WorkspaceDir, f))
+			ui.FileStatus(f, true, lines)
+		}
 	}
 
+	// Show standard directories with file counts
+	ui.Step(6, "Workspace — standard directories")
+	stdDirs := []struct {
+		name string
+		has  bool
+	}{
+		{"memory", oc.HasMemory},
+		{"skills", oc.HasSkills},
+		{"cron", oc.HasCron},
+		{"sessions", oc.HasSessions},
+	}
+	for _, d := range stdDirs {
+		if d.has {
+			dirPath := filepath.Join(oc.WorkspaceDir, d.name)
+			count := detect.CountDirFiles(dirPath)
+			size := detect.DirSize(dirPath)
+			ui.Found(d.name+"/", fmt.Sprintf("%d files (%s)", count, detect.FormatSize(size)))
+		} else {
+			ui.NotFound(d.name + "/")
+		}
+	}
+
+	// Show extra directories (project folders, repos, etc.)
+	if len(oc.ExtraDirs) > 0 {
+		ui.Step(7, fmt.Sprintf("Workspace — project directories (%d)", len(oc.ExtraDirs)))
+		for _, d := range oc.ExtraDirs {
+			dirPath := filepath.Join(oc.WorkspaceDir, d)
+			count := detect.CountDirFiles(dirPath)
+			size := detect.DirSize(dirPath)
+			ui.Found(d+"/", fmt.Sprintf("%d files (%s)", count, detect.FormatSize(size)))
+		}
+	}
+
+	// Summary totals
+	totalFiles := foundCount + len(oc.ExtraFiles)
+	totalDirs := len(oc.ExtraDirs)
+	for _, d := range stdDirs {
+		if d.has {
+			totalDirs++
+		}
+	}
+	totalSize := detect.DirSize(oc.WorkspaceDir)
+
+	fmt.Println()
+	ui.Info(fmt.Sprintf("Total: %d files, %d directories (%s)",
+		totalFiles, totalDirs, detect.FormatSize(totalSize)))
+
 	// Show PicoClaw status
-	ui.Step(4, "PicoClaw installation")
+	nextStep := 7
+	if len(oc.ExtraDirs) > 0 {
+		nextStep = 8
+	}
+	ui.Step(nextStep, "PicoClaw installation")
 	if pc.Found {
 		ui.Found("Directory", pc.HomeDir)
 		if pc.BinaryPath != "" {
@@ -356,20 +430,36 @@ func phase4Migrate(oc, pc detect.Installation, dryRun bool) {
 		// For now, fall through to our own migration as supplement
 	}
 
-	// === Step 2: Migrate workspace files ===
-	ui.Step(2, "Migrating workspace files")
+	// === Step 2: Migrate entire workspace ===
+	ui.Step(2, "Migrating workspace (all files and directories)")
 
 	if dryRun {
-		ui.Info("[DRY RUN] Would migrate workspace files:")
-		for _, f := range migrate.WorkspaceFiles {
+		ui.Info("[DRY RUN] Would migrate entire workspace:")
+
+		// Standard agent files
+		for _, f := range []string{"SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md", "TOOLS.md", "HEARTBEAT.md"} {
 			srcPath := filepath.Join(oc.WorkspaceDir, f)
 			if _, err := os.Stat(srcPath); err == nil {
 				lines := detect.CountFileLines(srcPath)
-				ui.Info(fmt.Sprintf("  %s → ~/.picoclaw/workspace/%s (%d lines)", f, f, lines))
+				ui.Info(fmt.Sprintf("  %s (%d lines)", f, lines))
 			}
 		}
-		ui.Info("  memory/ → ~/.picoclaw/workspace/memory/")
-		ui.Info("  skills/ → ~/.picoclaw/workspace/skills/")
+
+		// Extra files
+		for _, f := range oc.ExtraFiles {
+			lines := detect.CountFileLines(filepath.Join(oc.WorkspaceDir, f))
+			ui.Info(fmt.Sprintf("  %s (%d lines)", f, lines))
+		}
+
+		// Directories
+		entries, _ := os.ReadDir(oc.WorkspaceDir)
+		for _, entry := range entries {
+			if entry.IsDir() && !migrate.SkipEntries[entry.Name()] {
+				dirPath := filepath.Join(oc.WorkspaceDir, entry.Name())
+				count := detect.CountDirFiles(dirPath)
+				ui.Info(fmt.Sprintf("  %s/ (%d files)", entry.Name(), count))
+			}
+		}
 	} else {
 		result := migrate.MigrateWorkspace(oc.WorkspaceDir, picoWorkspace, true)
 

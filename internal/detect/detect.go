@@ -2,6 +2,7 @@ package detect
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,18 +12,41 @@ import (
 
 // Installation holds detected installation info
 type Installation struct {
-	Found         bool
-	HomeDir       string // e.g. ~/.openclaw or ~/.picoclaw
-	ConfigPath    string
-	WorkspaceDir  string
-	BinaryPath    string
-	Version       string
-	WorkspaceFiles map[string]bool // which workspace files exist
-	HasMemory     bool
-	HasSkills     bool
-	HasCron       bool
-	HasSessions   bool
-	Config        map[string]interface{} // parsed JSON config
+	Found          bool
+	HomeDir        string // e.g. ~/.openclaw or ~/.picoclaw
+	ConfigPath     string
+	WorkspaceDir   string
+	BinaryPath     string
+	Version        string
+	WorkspaceFiles map[string]bool // which standard workspace files exist
+	ExtraFiles     []string        // non-standard .md files in workspace root
+	ExtraDirs      []string        // non-standard directories in workspace root
+	HasMemory      bool
+	HasSkills      bool
+	HasCron        bool
+	HasSessions    bool
+	Config         map[string]interface{} // parsed JSON config
+	ConfigSummary  ConfigSummary          // human-readable config overview
+}
+
+// WorkspaceItem describes a file or directory in the workspace
+type WorkspaceItem struct {
+	Name    string
+	IsDir   bool
+	Lines   int   // for files
+	Files   int   // for directories (recursive count)
+	Size    int64 // total size in bytes
+}
+
+// ConfigSummary holds extracted config details for display
+type ConfigSummary struct {
+	DefaultModel      string
+	MaxTokens         int
+	Temperature       float64
+	HeartbeatEnabled  bool
+	HeartbeatInterval int
+	WorkspacePath     string
+	ConfigFileSize    int64
 }
 
 // SystemInfo holds system details
@@ -40,6 +64,18 @@ func GetSystemInfo() SystemInfo {
 		Arch: runtime.GOARCH,
 		Home: home,
 	}
+}
+
+// StandardFiles are the well-known agent workspace files
+var StandardFiles = map[string]bool{
+	"SOUL.md": true, "IDENTITY.md": true, "AGENTS.md": true,
+	"USER.md": true, "TOOLS.md": true, "HEARTBEAT.md": true,
+}
+
+// StandardDirs are the well-known workspace subdirectories
+var StandardDirs = map[string]bool{
+	"memory": true, "skills": true, "cron": true, "sessions": true,
+	"state": true, "config": true, ".git": true, ".openclaw": true,
 }
 
 // DetectOpenClaw checks for an OpenClaw installation
@@ -60,21 +96,32 @@ func DetectOpenClaw() Installation {
 	inst.ConfigPath = filepath.Join(inst.HomeDir, "openclaw.json")
 	if _, err := os.Stat(inst.ConfigPath); err == nil {
 		inst.Config = parseJSONFile(inst.ConfigPath)
+		inst.ConfigSummary = extractConfigSummary(inst.Config, inst.ConfigPath)
 	}
 
 	// Workspace
 	inst.WorkspaceDir = filepath.Join(inst.HomeDir, "workspace")
 
-	// Check workspace files
-	wsFiles := []string{"SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md", "TOOLS.md", "HEARTBEAT.md"}
-	for _, f := range wsFiles {
-		path := filepath.Join(inst.WorkspaceDir, f)
-		if _, err := os.Stat(path); err == nil {
-			inst.WorkspaceFiles[f] = true
+	// Scan ALL workspace contents
+	entries, err := os.ReadDir(inst.WorkspaceDir)
+	if err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() {
+				if !StandardDirs[name] {
+					inst.ExtraDirs = append(inst.ExtraDirs, name)
+				}
+			} else {
+				if StandardFiles[name] {
+					inst.WorkspaceFiles[name] = true
+				} else if name != ".DS_Store" && name != ".gitignore" {
+					inst.ExtraFiles = append(inst.ExtraFiles, name)
+				}
+			}
 		}
 	}
 
-	// Check subdirectories
+	// Check standard subdirectories
 	inst.HasMemory = dirHasFiles(filepath.Join(inst.WorkspaceDir, "memory"))
 	inst.HasSkills = dirHasFiles(filepath.Join(inst.WorkspaceDir, "skills"))
 	inst.HasCron = dirHasFiles(filepath.Join(inst.WorkspaceDir, "cron"))
@@ -217,4 +264,105 @@ func CountFileLines(path string) int {
 		return 0
 	}
 	return len(strings.Split(string(data), "\n"))
+}
+
+// CountDirFiles recursively counts files in a directory
+func CountDirFiles(path string) int {
+	count := 0
+	filepath.WalkDir(path, func(_ string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			count++
+		}
+		return nil
+	})
+	return count
+}
+
+// DirSize returns total size of a directory in bytes
+func DirSize(path string) int64 {
+	var size int64
+	filepath.WalkDir(path, func(_ string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			info, err := d.Info()
+			if err == nil {
+				size += info.Size()
+			}
+		}
+		return nil
+	})
+	return size
+}
+
+// FormatSize formats bytes into human-readable size
+func FormatSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+func extractConfigSummary(config map[string]interface{}, configPath string) ConfigSummary {
+	cs := ConfigSummary{}
+
+	// File size
+	if info, err := os.Stat(configPath); err == nil {
+		cs.ConfigFileSize = info.Size()
+	}
+
+	// Agent defaults
+	if agent, ok := config["agent"].(map[string]interface{}); ok {
+		if m, ok := agent["model"].(string); ok {
+			cs.DefaultModel = m
+		}
+		if mt, ok := agent["maxTokens"].(float64); ok {
+			cs.MaxTokens = int(mt)
+		}
+		if mt, ok := agent["max_tokens"].(float64); ok {
+			cs.MaxTokens = int(mt)
+		}
+		if t, ok := agent["temperature"].(float64); ok {
+			cs.Temperature = t
+		}
+	}
+	// Try agents.defaults too
+	if agents, ok := config["agents"].(map[string]interface{}); ok {
+		if defaults, ok := agents["defaults"].(map[string]interface{}); ok {
+			if m, ok := defaults["model"].(string); ok && cs.DefaultModel == "" {
+				cs.DefaultModel = m
+			}
+			if mt, ok := defaults["maxTokens"].(float64); ok && cs.MaxTokens == 0 {
+				cs.MaxTokens = int(mt)
+			}
+			if mt, ok := defaults["max_tokens"].(float64); ok && cs.MaxTokens == 0 {
+				cs.MaxTokens = int(mt)
+			}
+			if w, ok := defaults["workspace"].(string); ok {
+				cs.WorkspacePath = w
+			}
+		}
+	}
+
+	// Heartbeat
+	if hb, ok := config["heartbeat"].(map[string]interface{}); ok {
+		if enabled, ok := hb["enabled"].(bool); ok {
+			cs.HeartbeatEnabled = enabled
+		}
+		if interval, ok := hb["interval"].(float64); ok {
+			cs.HeartbeatInterval = int(interval)
+		}
+	}
+
+	return cs
 }
