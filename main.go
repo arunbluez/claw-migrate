@@ -104,6 +104,11 @@ func main() {
 // Phase 1: Detect installations
 // ════════════════════════════════════════════════════════════
 
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 func phase1Detect() {
 	ui.Phase(1, "Detecting installations")
 }
@@ -192,6 +197,7 @@ func showDetectionResults(oc, pc detect.Installation, sys detect.SystemInfo) {
 	}{
 		{"memory", oc.HasMemory},
 		{"skills", oc.HasSkills},
+		{"scripts", dirExists(filepath.Join(oc.WorkspaceDir, "scripts"))},
 		{"cron", oc.HasCron},
 		{"sessions", oc.HasSessions},
 	}
@@ -293,6 +299,11 @@ func phase2Backup(oc detect.Installation, dryRun bool) {
 func phase3Install(pc detect.Installation, sys detect.SystemInfo, dryRun bool) {
 	ui.Phase(3, "Install PicoClaw")
 
+	// Fetch latest version from GitHub
+	ui.Step(1, "Checking latest PicoClaw release")
+	version := install.FetchLatestVersion()
+	ui.Found("Latest version", "v"+version)
+
 	// Check if already installed
 	if pc.BinaryPath != "" {
 		ui.Success(fmt.Sprintf("PicoClaw already installed: %s", pc.BinaryPath))
@@ -318,7 +329,7 @@ func phase3Install(pc detect.Installation, sys detect.SystemInfo, dryRun bool) {
 
 	// Choose install method
 	method := ui.Choose("How would you like to install PicoClaw?", []string{
-		fmt.Sprintf("Download pre-built binary (%s, recommended)", install.LatestVersion),
+		fmt.Sprintf("Download pre-built binary (%s, recommended)", install.VersionTag()),
 		"Build from source (latest features, requires Go 1.21+)",
 	})
 

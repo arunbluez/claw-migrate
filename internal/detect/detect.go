@@ -75,7 +75,8 @@ var StandardFiles = map[string]bool{
 // StandardDirs are the well-known workspace subdirectories
 var StandardDirs = map[string]bool{
 	"memory": true, "skills": true, "cron": true, "sessions": true,
-	"state": true, "config": true, ".git": true, ".openclaw": true,
+	"state": true, "config": true, "scripts": true,
+	".git": true, ".openclaw": true,
 }
 
 // DetectOpenClaw checks for an OpenClaw installation

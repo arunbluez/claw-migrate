@@ -1,6 +1,7 @@
 package install
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -8,35 +9,109 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 const (
-	// LatestVersion is the current PicoClaw release
-	LatestVersion = "v0.1.2"
+	// FallbackVersion is used if we can't reach GitHub API
+	FallbackVersion = "0.1.2"
+	// RepoAPI for fetching latest release
+	RepoAPI = "https://api.github.com/repos/sipeed/picoclaw/releases/latest"
 	// BaseURL for GitHub releases
 	BaseURL = "https://github.com/sipeed/picoclaw/releases/download"
 )
 
-// GetDownloadURL returns the appropriate download URL for the current platform
-func GetDownloadURL() (string, string, error) {
-	os := runtime.GOOS
-	arch := runtime.GOARCH
+// LatestVersion holds the resolved version (fetched or fallback)
+var LatestVersion string
 
-	var filename string
-	switch {
-	case os == "darwin" && arch == "arm64":
-		filename = fmt.Sprintf("picoclaw-%s-macos-arm64.zip", LatestVersion)
-	case os == "darwin" && arch == "amd64":
-		filename = fmt.Sprintf("picoclaw-%s-macos-amd64.zip", LatestVersion)
-	case os == "linux" && arch == "arm64":
-		filename = fmt.Sprintf("picoclaw-%s-linux-arm64.tar.gz", LatestVersion)
-	case os == "linux" && arch == "amd64":
-		filename = fmt.Sprintf("picoclaw-%s-linux-amd64.tar.gz", LatestVersion)
-	default:
-		return "", "", fmt.Errorf("unsupported platform: %s/%s", os, arch)
+// FetchLatestVersion queries GitHub API for the latest PicoClaw release tag
+func FetchLatestVersion() string {
+	if LatestVersion != "" {
+		return LatestVersion
 	}
 
-	url := fmt.Sprintf("%s/%s/%s", BaseURL, LatestVersion, filename)
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", RepoAPI, nil)
+	if err != nil {
+		LatestVersion = FallbackVersion
+		return LatestVersion
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		LatestVersion = FallbackVersion
+		return LatestVersion
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		LatestVersion = FallbackVersion
+		return LatestVersion
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		LatestVersion = FallbackVersion
+		return LatestVersion
+	}
+
+	// Strip leading "v" if present (tag is "v0.1.2", we need "0.1.2")
+	LatestVersion = strings.TrimPrefix(release.TagName, "v")
+	if LatestVersion == "" {
+		LatestVersion = FallbackVersion
+	}
+	return LatestVersion
+}
+
+// VersionTag returns the version with "v" prefix for display
+func VersionTag() string {
+	return "v" + FetchLatestVersion()
+}
+
+// GetDownloadURL returns the appropriate download URL for the current platform
+// PicoClaw release naming: picoclaw_{OS}_{arch}.tar.gz
+//   OS:   Darwin, Linux, Freebsd
+//   arch: arm64, x86_64, armv6, mips64, riscv64
+func GetDownloadURL() (string, string, error) {
+	version := FetchLatestVersion()
+	goos := runtime.GOOS
+	goarch := runtime.GOARCH
+
+	// Map Go OS names to PicoClaw release names
+	osName := ""
+	switch goos {
+	case "darwin":
+		osName = "Darwin"
+	case "linux":
+		osName = "Linux"
+	case "freebsd":
+		osName = "Freebsd"
+	default:
+		return "", "", fmt.Errorf("unsupported OS: %s", goos)
+	}
+
+	// Map Go arch names to PicoClaw release names
+	archName := ""
+	switch goarch {
+	case "arm64":
+		archName = "arm64"
+	case "amd64":
+		archName = "x86_64"
+	case "arm":
+		archName = "armv6"
+	case "mips64":
+		archName = "mips64"
+	case "riscv64":
+		archName = "riscv64"
+	default:
+		return "", "", fmt.Errorf("unsupported architecture: %s", goarch)
+	}
+
+	filename := fmt.Sprintf("picoclaw_%s_%s.tar.gz", osName, archName)
+	url := fmt.Sprintf("%s/v%s/%s", BaseURL, version, filename)
 	return url, filename, nil
 }
 
@@ -62,24 +137,11 @@ func Download(url, destPath string) error {
 	return err
 }
 
-// Extract extracts the downloaded archive
+// Extract extracts the downloaded tar.gz archive
 func Extract(archivePath, destDir string) (string, error) {
-	ext := filepath.Ext(archivePath)
-	switch ext {
-	case ".zip":
-		// macOS zip
-		cmd := exec.Command("unzip", "-o", archivePath, "-d", destDir)
-		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("unzip failed: %w", err)
-		}
-	case ".gz":
-		// Linux tar.gz
-		cmd := exec.Command("tar", "-xzf", archivePath, "-C", destDir)
-		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("tar extract failed: %w", err)
-		}
-	default:
-		return "", fmt.Errorf("unknown archive format: %s", ext)
+	cmd := exec.Command("tar", "-xzf", archivePath, "-C", destDir)
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("tar extract failed: %w", err)
 	}
 
 	// Find the picoclaw binary in the extracted files
@@ -88,10 +150,10 @@ func Extract(archivePath, destDir string) (string, error) {
 		return binaryPath, nil
 	}
 
-	// Try common patterns
+	// Try common patterns (some releases nest in a subdirectory)
 	patterns := []string{
 		filepath.Join(destDir, "picoclaw-*", "picoclaw"),
-		filepath.Join(destDir, "picoclaw"),
+		filepath.Join(destDir, "picoclaw_*", "picoclaw"),
 	}
 	for _, pattern := range patterns {
 		matches, _ := filepath.Glob(pattern)
@@ -112,12 +174,16 @@ func InstallBinary(binaryPath string) error {
 		return fmt.Errorf("chmod failed: %w", err)
 	}
 
+	// Ensure /usr/local/bin exists
+	os.MkdirAll("/usr/local/bin", 0755)
+
 	// Try direct copy first
 	if err := copyFile(binaryPath, destPath); err == nil {
 		return nil
 	}
 
 	// Fall back to sudo
+	exec.Command("sudo", "mkdir", "-p", "/usr/local/bin").Run()
 	cmd := exec.Command("sudo", "cp", binaryPath, destPath)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
