@@ -71,40 +71,55 @@ The difference is scope. Here's what each tool covers:
 | Cron jobs | ❌ Manual | Recreate with `picoclaw cron add` |
 | Session history | ❌ Lost | Incompatible serialization format |
 
-## Install
+## Quick Start
 
-### Pre-built binary (recommended)
+Download and run — that's it. No `PATH` setup, no shell config, no `sudo`.
 
+**macOS (Apple Silicon — M1/M2/M3/M4)**
 ```bash
-# macOS (Apple Silicon)
-curl -L https://github.com/arunbluez/claw-migrate/releases/latest/download/claw-migrate-darwin-arm64.zip -o claw-migrate.zip
-unzip claw-migrate.zip && chmod +x claw-migrate
-sudo mv claw-migrate /usr/local/bin/
-
-# macOS (Intel)
-curl -L https://github.com/arunbluez/claw-migrate/releases/latest/download/claw-migrate-darwin-amd64.zip -o claw-migrate.zip
-unzip claw-migrate.zip && chmod +x claw-migrate
-sudo mv claw-migrate /usr/local/bin/
-
-# Linux (x86_64)
-curl -L https://github.com/arunbluez/claw-migrate/releases/latest/download/claw-migrate-linux-amd64.tar.gz | tar xz
-sudo mv claw-migrate /usr/local/bin/
-
-# Linux (ARM64)
-curl -L https://github.com/arunbluez/claw-migrate/releases/latest/download/claw-migrate-linux-arm64.tar.gz | tar xz
-sudo mv claw-migrate /usr/local/bin/
+curl -L https://github.com/arunbluez/claw-migrate/releases/latest/download/claw-migrate-macos-apple-silicon.zip -o claw-migrate.zip
+unzip claw-migrate.zip
+chmod +x claw-migrate
+./claw-migrate
 ```
 
-### Build from source
+**macOS (Intel)**
+```bash
+curl -L https://github.com/arunbluez/claw-migrate/releases/latest/download/claw-migrate-macos-intel.zip -o claw-migrate.zip
+unzip claw-migrate.zip
+chmod +x claw-migrate
+./claw-migrate
+```
+
+**Linux (x86_64)**
+```bash
+curl -L https://github.com/arunbluez/claw-migrate/releases/latest/download/claw-migrate-linux-x86_64.tar.gz | tar xz
+chmod +x claw-migrate
+./claw-migrate
+```
+
+**Linux (ARM64 / Raspberry Pi)**
+```bash
+curl -L https://github.com/arunbluez/claw-migrate/releases/latest/download/claw-migrate-linux-arm64.tar.gz | tar xz
+chmod +x claw-migrate
+./claw-migrate
+```
+
+> **Not sure which to pick?** Run `uname -m` — `arm64` or `aarch64` means ARM64, `x86_64` means amd64.
+
+<details>
+<summary><strong>Build from source</strong></summary>
+
+Requires Go 1.21+. Zero external dependencies.
 
 ```bash
 git clone https://github.com/arunbluez/claw-migrate.git
 cd claw-migrate
 make build
-sudo make install
+./bin/claw-migrate
 ```
 
-> **Zero external dependencies** — only requires Go 1.21+ to build.
+</details>
 
 ## Usage
 

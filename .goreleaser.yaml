@@ -1,9 +1,5 @@
 version: 2
 
-before:
-  hooks:
-    - go mod tidy
-
 builds:
   - main: .
     binary: claw-migrate
@@ -20,7 +16,7 @@ builds:
 
 archives:
   - format: tar.gz
-    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    name_template: '{{ .ProjectName }}-{{- if eq .Os "darwin" }}macos{{ else }}{{ .Os }}{{ end }}-{{- if and (eq .Os "darwin") (eq .Arch "arm64") }}apple-silicon{{- else if and (eq .Os "darwin") (eq .Arch "amd64") }}intel{{- else if eq .Arch "amd64" }}x86_64{{- else }}{{ .Arch }}{{- end }}'
     format_overrides:
       - goos: darwin
         format: zip
