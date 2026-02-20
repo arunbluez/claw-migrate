@@ -123,18 +123,36 @@ make build
 
 ## Usage
 
-### Full interactive wizard
+### Interactive mode (recommended)
 
 ```bash
-claw-migrate
+./claw-migrate
 ```
 
-The wizard walks you through 6 phases, with confirmations at each step:
+Shows a menu:
+```
+? What would you like to do?
+  1) Migrate — Full OpenClaw → PicoClaw migration
+  2) Backup  — Create a backup of OpenClaw
+  3) Restore — Restore OpenClaw from a backup
+```
+
+### Direct commands
+
+```bash
+./claw-migrate migrate     # Full 6-phase migration wizard
+./claw-migrate backup      # Just backup ~/.openclaw/
+./claw-migrate restore     # Restore from a previous backup
+```
+
+### Migration phases
+
+The `migrate` command walks you through 6 phases, with confirmations at each step:
 
 1. **Detect** — Scans for OpenClaw & PicoClaw, audits workspace files, providers, channels, MCP servers
 2. **Backup** — Creates `~/openclaw-backup-YYYYMMDD-HHMMSS.tar.gz` with integrity verification
 3. **Install** — Downloads PicoClaw binary (or builds from source), runs `picoclaw onboard`
-4. **Migrate** — Copies workspace, converts config, maps API keys (uses `picoclaw migrate` when available)
+4. **Migrate** — Copies entire workspace, converts config, checks model version
 5. **Verify** — Confirms everything transferred, prints test commands to try
 6. **Uninstall** — Removes OpenClaw binary, data, and macOS launch agents (optional, double confirmation)
 
@@ -240,6 +258,12 @@ make build-all    # Cross-compile for all platforms
 If anything goes wrong, restore from the backup created in Phase 2:
 
 ```bash
+./claw-migrate restore
+```
+
+Or manually:
+
+```bash
 pkill -f picoclaw
 cd ~ && tar -xzf openclaw-backup-*.tar.gz
 npm install -g openclaw@latest
@@ -258,4 +282,4 @@ MIT — see [LICENSE](LICENSE)
 
 ---
 
-*Built for 🦐 by [Arunkumar](https://github.com/arunbluez) — contributions welcome!*
+*Built with 🦐 by [Arunkumar](https://github.com/arunbluez) — contributions welcome!*

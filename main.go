@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,11 +15,27 @@ import (
 	"github.com/arunbluez/claw-migrate/internal/uninstall"
 )
 
+var version = "dev"
+
+// Known outdated models and their recommended replacements
+var modelUpgrades = map[string]string{
+	"anthropic/claude-sonnet-4-5":              "anthropic/claude-sonnet-4-6",
+	"anthropic/claude-3-5-sonnet":              "anthropic/claude-sonnet-4-6",
+	"anthropic/claude-3-opus":                  "anthropic/claude-opus-4-6",
+	"openai/gpt-4":                             "openai/gpt-5.2",
+	"openai/gpt-4-turbo":                       "openai/gpt-5.2",
+	"openai/gpt-4o":                            "openai/gpt-5.2",
+	"openrouter/anthropic/claude-sonnet-4-5":   "openrouter/anthropic/claude-sonnet-4-6",
+	"openrouter/anthropic/claude-3-5-sonnet":   "openrouter/anthropic/claude-sonnet-4-6",
+}
+
 func main() {
-	// Parse flags
 	dryRun := false
 	skipInstall := false
 	skipUninstall := false
+	subcommand := ""
+
+	args := []string{}
 	for _, arg := range os.Args[1:] {
 		switch arg {
 		case "--dry-run":
@@ -31,22 +48,291 @@ func main() {
 			printHelp()
 			return
 		case "--version", "-v":
-			fmt.Println("claw-migrate v1.0.0")
+			fmt.Printf("claw-migrate %s\n", version)
 			return
+		default:
+			if !strings.HasPrefix(arg, "-") {
+				args = append(args, arg)
+			}
 		}
 	}
 
-	// === Banner ===
+	if len(args) > 0 {
+		subcommand = args[0]
+	}
+
+	switch subcommand {
+	case "migrate":
+		runMigrate(dryRun, skipInstall, skipUninstall)
+	case "backup":
+		runBackup()
+	case "restore":
+		runRestore()
+	case "uninstall":
+		runUninstallMenu()
+	case "uninstall-openclaw":
+		runUninstallOpenClaw()
+	case "uninstall-picoclaw":
+		runUninstallPicoClaw()
+	case "":
+		// Interactive menu
+		ui.Banner()
+		choice := ui.Choose("What would you like to do?", []string{
+			"Migrate   — Full OpenClaw → PicoClaw migration",
+			"Backup    — Create a backup of OpenClaw",
+			"Restore   — Restore OpenClaw from a backup",
+			"Uninstall — Remove OpenClaw or PicoClaw",
+		})
+		switch choice {
+		case 0:
+			runMigrate(dryRun, skipInstall, skipUninstall)
+		case 1:
+			runBackup()
+		case 2:
+			runRestore()
+		case 3:
+			runUninstallMenu()
+		}
+	default:
+		ui.Error(fmt.Sprintf("Unknown command: %s", subcommand))
+		printHelp()
+		os.Exit(1)
+	}
+}
+
+func printHelp() {
+	fmt.Println("Usage: claw-migrate [command] [flags]")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  migrate     Full OpenClaw → PicoClaw migration (default)")
+	fmt.Println("  backup      Create a backup of ~/.openclaw/")
+	fmt.Println("  restore     Restore OpenClaw from a backup")
+	fmt.Println("  uninstall   Remove OpenClaw or PicoClaw")
+	fmt.Println()
+	fmt.Println("Flags:")
+	fmt.Println("  --dry-run          Preview without making changes")
+	fmt.Println("  --skip-install     Use existing PicoClaw installation")
+	fmt.Println("  --skip-uninstall   Keep OpenClaw installed")
+	fmt.Println("  --version          Show version")
+	fmt.Println("  --help             Show this help")
+	fmt.Println()
+	fmt.Println("Run without arguments for interactive mode.")
+}
+
+// ════════════════════════════════════════════════════════════
+// Standalone: Backup
+// ════════════════════════════════════════════════════════════
+
+func runBackup() {
+	ui.Banner()
+	ui.Phase(1, "Backup OpenClaw")
+
+	oc := detect.DetectOpenClaw()
+	if !oc.Found {
+		ui.Error("OpenClaw installation not found at ~/.openclaw/")
+		os.Exit(1)
+	}
+
+	ui.Found("Directory", oc.HomeDir)
+	totalSize := detect.DirSize(oc.HomeDir)
+	ui.Found("Size", detect.FormatSize(totalSize))
+	doBackup(oc, false)
+
+	ui.Success("Done!")
+}
+
+// ════════════════════════════════════════════════════════════
+// Standalone: Restore
+// ════════════════════════════════════════════════════════════
+
+func runRestore() {
+	ui.Banner()
+	ui.Phase(1, "Restore OpenClaw from backup")
+
+	backups := backup.ListBackups()
+	if len(backups) == 0 {
+		ui.Error("No backup files found (looking for ~/openclaw-backup-*.tar.gz)")
+		os.Exit(1)
+	}
+
+	ui.Step(1, fmt.Sprintf("Found %d backup(s)", len(backups)))
+
+	options := make([]string, len(backups))
+	for i, b := range backups {
+		options[i] = fmt.Sprintf("%s (%s)", b.Filename, backup.FormatSize(b.Size))
+	}
+
+	choice := ui.Choose("Which backup do you want to restore?", options)
+	selected := backups[choice]
+
+	ui.Warn(fmt.Sprintf("This will replace ~/.openclaw with the contents of %s", selected.Filename))
+	if !ui.ConfirmDangerous("Proceed with restore?") {
+		ui.Info("Restore cancelled.")
+		return
+	}
+
+	// Verify
+	ui.Step(2, "Verifying backup integrity")
+	verifyErr := ui.SpinnerRun("Verifying backup...", func() error {
+		return backup.VerifyBackup(selected.Path)
+	})
+	if verifyErr != nil {
+		ui.Error(fmt.Sprintf("Backup is corrupted: %v", verifyErr))
+		os.Exit(1)
+	}
+	ui.Success("Backup verified")
+
+	// Restore
+	ui.Step(3, "Restoring")
+	restoreErr := ui.SpinnerRun("Restoring OpenClaw...", func() error {
+		return backup.RestoreBackup(selected.Path)
+	})
+	if restoreErr != nil {
+		ui.Error(fmt.Sprintf("Restore failed: %v", restoreErr))
+		os.Exit(1)
+	}
+
+	ui.Success("OpenClaw restored from backup!")
+	ui.Info("Run: openclaw status")
+}
+
+// ════════════════════════════════════════════════════════════
+// Standalone: Uninstall
+// ════════════════════════════════════════════════════════════
+
+func runUninstallMenu() {
+	ui.Banner()
+
+	choice := ui.Choose("What do you want to uninstall?", []string{
+		"OpenClaw  — Remove OpenClaw (binary + data)",
+		"PicoClaw  — Remove PicoClaw (binary + data) for a fresh start",
+	})
+
+	switch choice {
+	case 0:
+		runUninstallOpenClaw()
+	case 1:
+		runUninstallPicoClaw()
+	}
+}
+
+func runUninstallOpenClaw() {
+	oc := detect.DetectOpenClaw()
+	if !oc.Found && oc.BinaryPath == "" {
+		ui.Error("OpenClaw installation not found")
+		os.Exit(1)
+	}
+
+	// Offer backup first
+	if oc.Found {
+		ui.Warn("It's recommended to create a backup before uninstalling.")
+		if ui.Confirm("Create a backup first?") {
+			doBackup(oc, false)
+		}
+	}
+
+	phase6Uninstall(oc, false)
+	ui.Success("Done!")
+}
+
+func runUninstallPicoClaw() {
+	home, _ := os.UserHomeDir()
+	picoHome := filepath.Join(home, ".picoclaw")
+
+	pc := detect.DetectPicoClaw()
+	if !pc.Found && pc.BinaryPath == "" {
+		ui.Error("PicoClaw installation not found")
+		os.Exit(1)
+	}
+
+	ui.Phase(1, "Uninstall PicoClaw")
+
+	if pc.BinaryPath != "" {
+		ui.Found("Binary", pc.BinaryPath)
+	}
+	if pc.Found {
+		ui.Found("Data", picoHome)
+		totalSize := detect.DirSize(picoHome)
+		ui.Found("Size", detect.FormatSize(totalSize))
+	}
+
+	ui.Warn("This will remove PicoClaw completely so you can start fresh.")
+	if !ui.ConfirmDangerous("Uninstall PicoClaw?") {
+		ui.Info("Cancelled.")
+		return
+	}
+
+	// Stop processes
+	ui.Step(1, "Stopping PicoClaw processes")
+	uninstall.StopPicoClaw()
+	ui.Success("Processes stopped")
+
+	// Remove binary
+	if pc.BinaryPath != "" {
+		ui.Step(2, "Removing binary")
+		if err := uninstall.RemovePicoClawBinary(); err != nil {
+			ui.Warn(fmt.Sprintf("Could not remove binary: %v", err))
+			ui.Info("You may need to manually delete: " + pc.BinaryPath)
+		} else {
+			ui.Success("Binary removed")
+		}
+	}
+
+	// Remove launch agents (macOS)
+	ui.Step(3, "Removing launch agents")
+	if removed := uninstall.RemovePicoClawLaunchAgents(); len(removed) > 0 {
+		ui.Success(fmt.Sprintf("Removed %d launch agent(s)", len(removed)))
+	} else {
+		ui.Info("No launch agents found")
+	}
+
+	// Remove data
+	if pc.Found {
+		ui.Step(4, "Removing data directory")
+		ui.Warn(fmt.Sprintf("About to delete: %s", picoHome))
+
+		if !ui.ConfirmDangerous("Delete all PicoClaw data?") {
+			ui.Info("Data directory preserved at " + picoHome)
+		} else {
+			if err := uninstall.RemoveData(picoHome); err != nil {
+				ui.Error(fmt.Sprintf("Could not remove data: %v", err))
+			} else {
+				ui.Success("PicoClaw data removed")
+			}
+		}
+	}
+
+	// Verify
+	ui.Step(5, "Verifying removal")
+	binaryGone, dataGone, _ := uninstall.VerifyPicoClawRemoved()
+	if binaryGone && dataGone {
+		ui.Success("PicoClaw completely removed")
+	} else {
+		if !binaryGone {
+			ui.Warn("Binary still found — try: sudo rm " + pc.BinaryPath)
+		}
+		if !dataGone {
+			ui.Warn("Data still found — try: rm -rf " + picoHome)
+		}
+	}
+
+	fmt.Println()
+	ui.Info("You can now run a fresh migration with: ./claw-migrate migrate")
+}
+
+// ════════════════════════════════════════════════════════════
+// Full migration flow
+// ════════════════════════════════════════════════════════════
+
+func runMigrate(dryRun, skipInstall, skipUninstall bool) {
 	ui.Banner()
 
 	if dryRun {
 		ui.Warn("DRY RUN mode — no changes will be made")
 	}
 
-	// === Phase 1: Detect ===
+	// Phase 1: Detect
 	phase1Detect()
-
-	// Get installations
 	oc := detect.DetectOpenClaw()
 	pc := detect.DetectPicoClaw()
 	sys := detect.GetSystemInfo()
@@ -54,40 +340,36 @@ func main() {
 	if !oc.Found {
 		ui.Error("OpenClaw installation not found at ~/.openclaw/")
 		ui.Info("Make sure OpenClaw is installed and has been initialized.")
-		ui.Info("Expected directory: ~/.openclaw/")
 		os.Exit(1)
 	}
 
-	// Show what we found
 	showDetectionResults(oc, pc, sys)
 
-	// Ask to proceed
 	if !ui.Confirm("Ready to begin migration?") {
 		ui.Info("Migration cancelled. No changes made.")
 		return
 	}
 
-	// === Phase 2: Backup ===
+	// Phase 2: Backup
 	phase2Backup(oc, dryRun)
 
-	// === Phase 3: Install PicoClaw ===
+	// Phase 3: Install PicoClaw
 	if !skipInstall {
 		phase3Install(pc, sys, dryRun)
 	} else {
 		ui.Phase(3, "Install PicoClaw (skipped)")
-		ui.Info("--skip-install flag set, skipping installation")
+		ui.Info("--skip-install flag set")
 	}
 
-	// Re-detect PicoClaw after install
 	pc = detect.DetectPicoClaw()
 
-	// === Phase 4: Migrate ===
+	// Phase 4: Migrate
 	phase4Migrate(oc, pc, dryRun)
 
-	// === Phase 5: Verify ===
+	// Phase 5: Verify
 	phase5Verify()
 
-	// === Phase 6: Uninstall OpenClaw ===
+	// Phase 6: Uninstall
 	if !skipUninstall {
 		phase6Uninstall(oc, dryRun)
 	} else {
@@ -96,12 +378,11 @@ func main() {
 		ui.Info("  npm uninstall -g openclaw && rm -rf ~/.openclaw")
 	}
 
-	// === Done ===
 	ui.CompletionBanner()
 }
 
 // ════════════════════════════════════════════════════════════
-// Phase 1: Detect installations
+// Phase 1: Detect
 // ════════════════════════════════════════════════════════════
 
 func dirExists(path string) bool {
@@ -119,7 +400,6 @@ func showDetectionResults(oc, pc detect.Installation, sys detect.SystemInfo) {
 
 	ui.Step(2, "OpenClaw installation")
 	ui.Found("Directory", oc.HomeDir)
-
 	if oc.BinaryPath != "" {
 		ui.Found("Binary", oc.BinaryPath)
 	}
@@ -127,38 +407,38 @@ func showDetectionResults(oc, pc detect.Installation, sys detect.SystemInfo) {
 		ui.Found("Version", oc.Version)
 	}
 
-	// Show config details
+	// Config summary
 	ui.Step(3, "Configuration")
 	if oc.Config != nil {
 		ui.Found("Config file", fmt.Sprintf("%s (%s)", oc.ConfigPath, detect.FormatSize(oc.ConfigSummary.ConfigFileSize)))
 
-		// Model & agent settings
 		if oc.ConfigSummary.DefaultModel != "" {
-			ui.Found("Default model", oc.ConfigSummary.DefaultModel)
+			// Check if model is outdated
+			if upgrade, found := modelUpgrades[oc.ConfigSummary.DefaultModel]; found {
+				ui.Warn(fmt.Sprintf("Default model          %s (outdated → %s available)", oc.ConfigSummary.DefaultModel, upgrade))
+			} else {
+				ui.Found("Default model", oc.ConfigSummary.DefaultModel)
+			}
 		}
 		if oc.ConfigSummary.MaxTokens > 0 {
 			ui.Found("Max tokens", fmt.Sprintf("%d", oc.ConfigSummary.MaxTokens))
 		}
 
-		// Providers
 		providers := detect.GetProviderKeys(oc.Config)
 		if len(providers) > 0 {
 			ui.Found("Providers", strings.Join(providers, ", "))
 		}
 
-		// Channels
 		channels := detect.GetConfiguredChannels(oc.Config)
 		if len(channels) > 0 {
 			ui.Found("Channels", strings.Join(channels, ", "))
 		}
 
-		// MCP servers
 		mcpServers := detect.GetMCPServers(oc.Config)
 		if len(mcpServers) > 0 {
 			ui.Found("MCP Servers", strings.Join(mcpServers, ", "))
 		}
 
-		// Heartbeat
 		if oc.ConfigSummary.HeartbeatEnabled {
 			ui.Found("Heartbeat", fmt.Sprintf("enabled (every %d min)", oc.ConfigSummary.HeartbeatInterval))
 		}
@@ -166,7 +446,7 @@ func showDetectionResults(oc, pc detect.Installation, sys detect.SystemInfo) {
 		ui.NotFound("Config file")
 	}
 
-	// Show workspace — standard agent files
+	// Workspace — standard agent files
 	ui.Step(4, "Workspace — agent files")
 	standardFileList := []string{"SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md", "TOOLS.md", "HEARTBEAT.md"}
 	foundCount := 0
@@ -180,7 +460,7 @@ func showDetectionResults(oc, pc detect.Installation, sys detect.SystemInfo) {
 		ui.FileStatus(f, exists, lines)
 	}
 
-	// Show extra files (non-standard .md files and other files)
+	// Extra files
 	if len(oc.ExtraFiles) > 0 {
 		ui.Step(5, fmt.Sprintf("Workspace — custom files (%d)", len(oc.ExtraFiles)))
 		for _, f := range oc.ExtraFiles {
@@ -189,7 +469,7 @@ func showDetectionResults(oc, pc detect.Installation, sys detect.SystemInfo) {
 		}
 	}
 
-	// Show standard directories with file counts
+	// Standard directories
 	ui.Step(6, "Workspace — standard directories")
 	stdDirs := []struct {
 		name string
@@ -212,7 +492,7 @@ func showDetectionResults(oc, pc detect.Installation, sys detect.SystemInfo) {
 		}
 	}
 
-	// Show extra directories (project folders, repos, etc.)
+	// Project directories
 	if len(oc.ExtraDirs) > 0 {
 		ui.Step(7, fmt.Sprintf("Workspace — project directories (%d)", len(oc.ExtraDirs)))
 		for _, d := range oc.ExtraDirs {
@@ -232,12 +512,11 @@ func showDetectionResults(oc, pc detect.Installation, sys detect.SystemInfo) {
 		}
 	}
 	totalSize := detect.DirSize(oc.WorkspaceDir)
-
 	fmt.Println()
 	ui.Info(fmt.Sprintf("Total: %d files, %d directories (%s)",
 		totalFiles, totalDirs, detect.FormatSize(totalSize)))
 
-	// Show PicoClaw status
+	// PicoClaw status
 	nextStep := 7
 	if len(oc.ExtraDirs) > 0 {
 		nextStep = 8
@@ -263,7 +542,10 @@ func showDetectionResults(oc, pc detect.Installation, sys detect.SystemInfo) {
 
 func phase2Backup(oc detect.Installation, dryRun bool) {
 	ui.Phase(2, "Backup OpenClaw")
+	doBackup(oc, dryRun)
+}
 
+func doBackup(oc detect.Installation, dryRun bool) {
 	ui.Step(1, "Creating full backup of ~/.openclaw/")
 
 	if dryRun {
@@ -271,11 +553,19 @@ func phase2Backup(oc detect.Installation, dryRun bool) {
 		return
 	}
 
-	result := backup.CreateBackup(oc.HomeDir)
-	if !result.Success {
-		ui.Error(fmt.Sprintf("Backup failed: %v", result.Error))
+	var result backup.Result
+	err := ui.SpinnerRun("Creating backup (this may take a minute)...", func() error {
+		result = backup.CreateBackup(oc.HomeDir)
+		if !result.Success {
+			return result.Error
+		}
+		return nil
+	})
+
+	if err != nil {
+		ui.Error(fmt.Sprintf("Backup failed: %v", err))
 		if !ui.ConfirmDangerous("Continue WITHOUT backup? (not recommended)") {
-			ui.Info("Migration cancelled. Fix the backup issue and try again.")
+			ui.Info("Migration cancelled.")
 			os.Exit(1)
 		}
 		return
@@ -283,10 +573,13 @@ func phase2Backup(oc detect.Installation, dryRun bool) {
 
 	ui.Success(fmt.Sprintf("Backup created: %s (%s)", result.Path, backup.FormatSize(result.Size)))
 
-	// Verify backup
+	// Verify
 	ui.Step(2, "Verifying backup integrity")
-	if err := backup.VerifyBackup(result.Path); err != nil {
-		ui.Warn(fmt.Sprintf("Backup verification warning: %v", err))
+	verifyErr := ui.SpinnerRun("Verifying...", func() error {
+		return backup.VerifyBackup(result.Path)
+	})
+	if verifyErr != nil {
+		ui.Warn(fmt.Sprintf("Backup verification warning: %v", verifyErr))
 	} else {
 		ui.Success("Backup verified successfully")
 	}
@@ -299,22 +592,22 @@ func phase2Backup(oc detect.Installation, dryRun bool) {
 func phase3Install(pc detect.Installation, sys detect.SystemInfo, dryRun bool) {
 	ui.Phase(3, "Install PicoClaw")
 
-	// Fetch latest version from GitHub
+	// Fetch latest version
 	ui.Step(1, "Checking latest PicoClaw release")
-	version := install.FetchLatestVersion()
-	ui.Found("Latest version", "v"+version)
+	var fetchedVersion string
+	ui.SpinnerRun("Fetching latest version...", func() error {
+		fetchedVersion = install.FetchLatestVersion()
+		return nil
+	})
+	ui.Found("Latest version", "v"+fetchedVersion)
 
-	// Check if already installed
+	// Already installed?
 	if pc.BinaryPath != "" {
 		ui.Success(fmt.Sprintf("PicoClaw already installed: %s", pc.BinaryPath))
 		if pc.Version != "" {
 			ui.Info(fmt.Sprintf("Version: %s", pc.Version))
 		}
-
-		if !ui.Confirm("Skip installation and use existing PicoClaw?") {
-			// User wants to reinstall
-		} else {
-			// Initialize if needed
+		if ui.Confirm("Skip installation and use existing PicoClaw?") {
 			if !pc.Found {
 				ui.Step(2, "Initializing PicoClaw workspace")
 				if !dryRun {
@@ -327,7 +620,6 @@ func phase3Install(pc detect.Installation, sys detect.SystemInfo, dryRun bool) {
 		}
 	}
 
-	// Choose install method
 	method := ui.Choose("How would you like to install PicoClaw?", []string{
 		fmt.Sprintf("Download pre-built binary (%s, recommended)", install.VersionTag()),
 		"Build from source (latest features, requires Go 1.21+)",
@@ -345,14 +637,12 @@ func phase3Install(pc detect.Installation, sys detect.SystemInfo, dryRun bool) {
 	}
 
 	if method == 0 {
-		// Download pre-built binary
 		installFromRelease(sys)
 	} else {
-		// Build from source
 		installFromSource()
 	}
 
-	// Initialize PicoClaw
+	// Initialize
 	ui.Step(3, "Initializing PicoClaw")
 	ui.Info("Running: picoclaw onboard")
 	if err := install.RunOnboard(); err != nil {
@@ -375,8 +665,11 @@ func installFromRelease(sys detect.SystemInfo) {
 	tmpDir := os.TempDir()
 	archivePath := filepath.Join(tmpDir, filename)
 
-	if err := install.Download(url, archivePath); err != nil {
-		ui.Fatal(fmt.Sprintf("Download failed: %v", err))
+	dlErr := ui.SpinnerRun("Downloading...", func() error {
+		return install.Download(url, archivePath)
+	})
+	if dlErr != nil {
+		ui.Fatal(fmt.Sprintf("Download failed: %v", dlErr))
 	}
 	ui.Success("Download complete")
 
@@ -390,9 +683,8 @@ func installFromRelease(sys detect.SystemInfo) {
 	if err := install.InstallBinary(binaryPath); err != nil {
 		ui.Fatal(fmt.Sprintf("Install failed: %v", err))
 	}
-	ui.Success("PicoClaw installed to /usr/local/bin/picoclaw")
+	ui.Success("PicoClaw installed")
 
-	// Cleanup
 	os.Remove(archivePath)
 }
 
@@ -400,8 +692,10 @@ func installFromSource() {
 	ui.Step(1, "Building PicoClaw from source")
 	tmpDir := os.TempDir()
 
-	ui.Info("Cloning repository and building...")
-	if err := install.BuildFromSource(tmpDir); err != nil {
+	err := ui.SpinnerRun("Cloning and building (this may take a few minutes)...", func() error {
+		return install.BuildFromSource(tmpDir)
+	})
+	if err != nil {
 		ui.Fatal(fmt.Sprintf("Build failed: %v", err))
 	}
 	ui.Success("PicoClaw built and installed from source")
@@ -418,16 +712,10 @@ func phase4Migrate(oc, pc detect.Installation, dryRun bool) {
 	picoHome := filepath.Join(home, ".picoclaw")
 	picoWorkspace := filepath.Join(picoHome, "workspace")
 
-	// === Step 1: Try built-in migration tool ===
+	// Step 1: Check built-in migration tool
 	ui.Step(1, "Checking for PicoClaw's built-in migration tool")
 
-	// Check if picoclaw migrate exists
-	builtInAvailable := false
-	if pc.BinaryPath != "" {
-		// The built-in migrate command was added in v0.1.1
-		builtInAvailable = true
-	}
-
+	builtInAvailable := pc.BinaryPath != ""
 	useBuiltIn := false
 	if builtInAvailable {
 		ui.Success("Built-in 'picoclaw migrate' command is available")
@@ -436,69 +724,53 @@ func phase4Migrate(oc, pc detect.Installation, dryRun bool) {
 
 	if useBuiltIn && !dryRun {
 		ui.Info("Running: picoclaw migrate --force")
-		ui.Info("(This handles workspace files + config conversion)")
-		// Note: we'd execute picoclaw migrate here
-		// For now, fall through to our own migration as supplement
 	}
 
-	// === Step 2: Migrate entire workspace ===
+	// Step 2: Migrate workspace — condensed output
 	ui.Step(2, "Migrating workspace (all files and directories)")
 
 	if dryRun {
-		ui.Info("[DRY RUN] Would migrate entire workspace:")
-
-		// Standard agent files
-		for _, f := range []string{"SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md", "TOOLS.md", "HEARTBEAT.md"} {
-			srcPath := filepath.Join(oc.WorkspaceDir, f)
-			if _, err := os.Stat(srcPath); err == nil {
-				lines := detect.CountFileLines(srcPath)
-				ui.Info(fmt.Sprintf("  %s (%d lines)", f, lines))
-			}
-		}
-
-		// Extra files
-		for _, f := range oc.ExtraFiles {
-			lines := detect.CountFileLines(filepath.Join(oc.WorkspaceDir, f))
-			ui.Info(fmt.Sprintf("  %s (%d lines)", f, lines))
-		}
-
-		// Directories
+		fileCount := 0
+		dirCount := 0
 		entries, _ := os.ReadDir(oc.WorkspaceDir)
 		for _, entry := range entries {
-			if entry.IsDir() && !migrate.SkipEntries[entry.Name()] {
+			if migrate.SkipEntries[entry.Name()] {
+				continue
+			}
+			if entry.IsDir() {
+				dirCount++
 				dirPath := filepath.Join(oc.WorkspaceDir, entry.Name())
-				count := detect.CountDirFiles(dirPath)
-				ui.Info(fmt.Sprintf("  %s/ (%d files)", entry.Name(), count))
+				fileCount += detect.CountDirFiles(dirPath)
+			} else {
+				fileCount++
 			}
 		}
+		ui.Info(fmt.Sprintf("[DRY RUN] Would migrate %d files across %d directories", fileCount, dirCount))
 	} else {
-		result := migrate.MigrateWorkspace(oc.WorkspaceDir, picoWorkspace, true)
-
-		for _, fr := range result.Files {
-			if fr.Migrated {
-				ui.FileStatus(fr.Name, true, fr.Lines)
-			} else if fr.Skipped {
-				ui.FileStatus(fr.Name, false, 0)
-			} else if fr.Error != nil {
-				ui.Error(fmt.Sprintf("%s: %v", fr.Name, fr.Error))
-			}
-		}
+		var result migrate.Result
+		ui.SpinnerRun("Copying workspace files...", func() error {
+			result = migrate.MigrateWorkspace(oc.WorkspaceDir, picoWorkspace, true)
+			return nil
+		})
 
 		ui.Success(fmt.Sprintf("Migrated %d files (%d skipped, %d errors)",
 			result.Migrated, result.Skipped, result.Errors))
+
+		// Only show individual files if there were errors
+		if result.Errors > 0 {
+			for _, fr := range result.Files {
+				if fr.Error != nil {
+					ui.Error(fmt.Sprintf("  %s: %v", fr.Name, fr.Error))
+				}
+			}
+		}
 	}
 
-	// === Step 3: Migrate config ===
+	// Step 3: Migrate config
 	ui.Step(3, "Converting configuration")
 
 	if dryRun {
 		ui.Info("[DRY RUN] Would convert: openclaw.json → config.json")
-		if oc.Config != nil {
-			providers := detect.GetProviderKeys(oc.Config)
-			channels := detect.GetConfiguredChannels(oc.Config)
-			ui.Info(fmt.Sprintf("  Providers: %s", strings.Join(providers, ", ")))
-			ui.Info(fmt.Sprintf("  Channels: %s", strings.Join(channels, ", ")))
-		}
 	} else {
 		picoConfigPath := filepath.Join(picoHome, "config.json")
 		fr := migrate.MigrateConfig(oc.ConfigPath, picoConfigPath, true)
@@ -512,12 +784,15 @@ func phase4Migrate(oc, pc detect.Installation, dryRun bool) {
 		}
 	}
 
-	// === Step 4: Manual items reminder ===
-	ui.Step(4, "Items requiring manual attention")
+	// Step 4: Model version check
+	ui.Step(4, "Checking model version")
+	checkModelVersion(oc, picoHome, dryRun)
+
+	// Step 5: Manual items
+	ui.Step(5, "Items requiring manual attention")
 
 	manualItems := []string{}
 
-	// Check for MCP servers
 	if oc.Config != nil {
 		mcpServers := detect.GetMCPServers(oc.Config)
 		if len(mcpServers) > 0 {
@@ -525,18 +800,17 @@ func phase4Migrate(oc, pc detect.Installation, dryRun bool) {
 		}
 	}
 
-	// Check for cron jobs
 	if oc.HasCron {
 		manualItems = append(manualItems, "Cron jobs — recreate with: picoclaw cron add ...")
 	}
 
-	// Check for unsupported channels
 	if oc.Config != nil {
 		channels := detect.GetConfiguredChannels(oc.Config)
 		unsupported := []string{}
 		supported := map[string]bool{
 			"telegram": true, "discord": true, "qq": true,
 			"dingtalk": true, "line": true, "slack": true,
+			"feishu": true, "onebot": true,
 		}
 		for _, ch := range channels {
 			if !supported[ch] {
@@ -556,8 +830,108 @@ func phase4Migrate(oc, pc detect.Installation, dryRun bool) {
 			fmt.Printf("    "+ui.Yellow+"•"+ui.Reset+" %s\n", item)
 		}
 	} else {
-		ui.Success("No manual items needed — everything migrated automatically!")
+		ui.Success("No manual items — everything migrated automatically!")
 	}
+}
+
+// checkModelVersion warns about outdated models and offers upgrade
+func checkModelVersion(oc detect.Installation, picoHome string, dryRun bool) {
+	currentModel := extractModelString(oc.Config)
+
+	if currentModel == "" {
+		ui.Info("No default model detected in config")
+		return
+	}
+
+	if upgrade, found := modelUpgrades[currentModel]; found {
+		ui.Warn(fmt.Sprintf("Current model: %s (outdated)", currentModel))
+		ui.Info(fmt.Sprintf("Recommended:   %s", upgrade))
+
+		if !dryRun {
+			if ui.Confirm(fmt.Sprintf("Update model to %s?", upgrade)) {
+				picoConfigPath := filepath.Join(picoHome, "config.json")
+				if err := updateModelInConfig(picoConfigPath, upgrade); err != nil {
+					ui.Error(fmt.Sprintf("Could not update model: %v", err))
+				} else {
+					ui.Success(fmt.Sprintf("Model updated to %s", upgrade))
+				}
+			} else {
+				ui.Info(fmt.Sprintf("Keeping %s — you can change later in ~/.picoclaw/config.json", currentModel))
+			}
+		} else {
+			ui.Info(fmt.Sprintf("[DRY RUN] Would offer to upgrade to %s", upgrade))
+		}
+	} else {
+		ui.Success(fmt.Sprintf("Model: %s (current)", currentModel))
+	}
+}
+
+// extractModelString gets the model name from OpenClaw config, handling both string and object formats
+func extractModelString(config map[string]interface{}) string {
+	if config == nil {
+		return ""
+	}
+
+	// Try agent.model
+	if agent, ok := config["agent"].(map[string]interface{}); ok {
+		if model, ok := agent["model"]; ok {
+			switch m := model.(type) {
+			case string:
+				return m
+			case map[string]interface{}:
+				for _, key := range []string{"primary", "name", "model", "default"} {
+					if v, ok := m[key].(string); ok && v != "" {
+						return v
+					}
+				}
+			}
+		}
+	}
+
+	// Try agents.defaults.model
+	if agents, ok := config["agents"].(map[string]interface{}); ok {
+		if defaults, ok := agents["defaults"].(map[string]interface{}); ok {
+			if model, ok := defaults["model"]; ok {
+				switch m := model.(type) {
+				case string:
+					return m
+				case map[string]interface{}:
+					for _, key := range []string{"primary", "name", "model", "default"} {
+						if v, ok := m[key].(string); ok && v != "" {
+							return v
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+func updateModelInConfig(configPath, newModel string) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
+	}
+
+	var configMap map[string]interface{}
+	if err := json.Unmarshal(data, &configMap); err != nil {
+		return err
+	}
+
+	if agents, ok := configMap["agents"].(map[string]interface{}); ok {
+		if defaults, ok := agents["defaults"].(map[string]interface{}); ok {
+			defaults["model"] = newModel
+		}
+	}
+
+	out, err := json.MarshalIndent(configMap, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(configPath, out, 0644)
 }
 
 // ════════════════════════════════════════════════════════════
@@ -567,50 +941,58 @@ func phase4Migrate(oc, pc detect.Installation, dryRun bool) {
 func phase5Verify() {
 	ui.Phase(5, "Verify migration")
 
-	ui.Step(1, "Testing PicoClaw")
+	home, _ := os.UserHomeDir()
+	picoWorkspace := filepath.Join(home, ".picoclaw", "workspace")
+	picoConfig := filepath.Join(home, ".picoclaw", "config.json")
 
-	// Re-detect to verify
-	pc := detect.DetectPicoClaw()
+	ui.Step(1, "Checking PicoClaw workspace")
 
-	if !pc.Found {
-		ui.Error("PicoClaw workspace not found after migration")
+	// Check workspace exists
+	if _, err := os.Stat(picoWorkspace); os.IsNotExist(err) {
+		ui.Error("PicoClaw workspace not found!")
 		return
 	}
+	ui.Success("Workspace directory exists")
 
-	ui.Success(fmt.Sprintf("Workspace: %s", pc.WorkspaceDir))
-
-	// Check workspace files
-	allFiles := []string{"SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md", "TOOLS.md", "HEARTBEAT.md"}
-	migratedCount := 0
-	for _, f := range allFiles {
-		if pc.WorkspaceFiles[f] {
-			migratedCount++
-		}
-	}
-	ui.Success(fmt.Sprintf("Workspace files: %d/%d present", migratedCount, len(allFiles)))
+	// Count files
+	fileCount := detect.CountDirFiles(picoWorkspace)
+	size := detect.DirSize(picoWorkspace)
+	ui.Found("Workspace", fmt.Sprintf("%d files (%s)", fileCount, detect.FormatSize(size)))
 
 	// Check config
-	if pc.Config != nil {
-		ui.Success("Config file: valid JSON")
+	if _, err := os.Stat(picoConfig); err == nil {
+		ui.Success("Configuration file exists")
 	} else {
-		ui.Warn("Config file: could not parse — manual review needed")
+		ui.Warn("Configuration file missing")
 	}
 
-	ui.Step(2, "Quick test")
-	ui.Info("Try running these commands to verify:")
-	fmt.Println()
-	fmt.Println("    " + ui.Cyan + "picoclaw status" + ui.Reset + "                    # Check status")
-	fmt.Println("    " + ui.Cyan + "picoclaw agent -m \"Hello!\"" + ui.Reset + "         # Test chat")
-	fmt.Println("    " + ui.Cyan + "picoclaw gateway" + ui.Reset + "                    # Start Telegram bot")
-	fmt.Println()
-
-	if !ui.Confirm("Have you tested PicoClaw and confirmed it works?") {
-		ui.Warn("Skipping uninstall phase. You can uninstall OpenClaw later.")
-		ui.Info("Run: claw-migrate --skip-install to skip to uninstall phase")
-		ui.Info("Or manually: npm uninstall -g openclaw && rm -rf ~/.openclaw")
-		ui.CompletionBanner()
-		os.Exit(0)
+	// Check key workspace files
+	ui.Step(2, "Checking key files")
+	keyFiles := []string{"SOUL.md", "IDENTITY.md", "AGENTS.md"}
+	allGood := true
+	for _, f := range keyFiles {
+		path := filepath.Join(picoWorkspace, f)
+		if _, err := os.Stat(path); err == nil {
+			lines := detect.CountFileLines(path)
+			ui.FileStatus(f, true, lines)
+		} else {
+			ui.FileStatus(f, false, 0)
+			allGood = false
+		}
 	}
+
+	if allGood {
+		ui.Success("All key files present")
+	}
+
+	// Suggested test commands
+	ui.Step(3, "Test your PicoClaw installation")
+	ui.Info("Try these commands:")
+	fmt.Println()
+	fmt.Println("    " + ui.Cyan + "picoclaw status" + ui.Reset + "          # Check status")
+	fmt.Println("    " + ui.Cyan + "picoclaw agent" + ui.Reset + "           # Chat with your agent")
+	fmt.Println("    " + ui.Cyan + "picoclaw gateway" + ui.Reset + "         # Start the gateway")
+	fmt.Println()
 }
 
 // ════════════════════════════════════════════════════════════
@@ -620,128 +1002,63 @@ func phase5Verify() {
 func phase6Uninstall(oc detect.Installation, dryRun bool) {
 	ui.Phase(6, "Uninstall OpenClaw")
 
-	if !ui.ConfirmDangerous("Remove OpenClaw? (backup was created in Phase 2)") {
-		ui.Info("Skipping uninstall. OpenClaw remains installed.")
-		ui.Info("You can uninstall later with:")
-		ui.Info("  npm uninstall -g openclaw")
-		ui.Info("  rm -rf ~/.openclaw")
+	ui.Warn("This will remove OpenClaw completely:")
+	fmt.Printf("    "+ui.Yellow+"•"+ui.Reset+" Binary: %s\n", oc.BinaryPath)
+	fmt.Printf("    "+ui.Yellow+"•"+ui.Reset+" Data: %s\n", oc.HomeDir)
+
+	if !ui.ConfirmDangerous("Uninstall OpenClaw?") {
+		ui.Info("OpenClaw preserved. You can uninstall later with:")
+		ui.Info("  npm uninstall -g openclaw && rm -rf ~/.openclaw")
 		return
 	}
 
-	// Step 1: Stop processes
+	if dryRun {
+		ui.Info("[DRY RUN] Would uninstall OpenClaw")
+		return
+	}
+
+	// Stop processes
 	ui.Step(1, "Stopping OpenClaw processes")
-	if dryRun {
-		ui.Info("[DRY RUN] Would stop all OpenClaw processes")
+	uninstall.StopOpenClaw()
+	ui.Success("Processes stopped")
+
+	// Remove binary
+	ui.Step(2, "Removing binary")
+	if err := uninstall.RemoveBinary(); err != nil {
+		ui.Warn(fmt.Sprintf("Could not remove binary: %v", err))
 	} else {
-		uninstall.StopOpenClaw()
-		ui.Success("OpenClaw processes stopped")
+		ui.Success("Binary removed")
 	}
 
-	// Step 2: Remove binary
-	ui.Step(2, "Removing OpenClaw binary")
-	if dryRun {
-		ui.Info("[DRY RUN] Would run: npm uninstall -g openclaw")
-	} else {
-		if err := uninstall.RemoveBinary(); err != nil {
-			ui.Warn(fmt.Sprintf("Could not remove via npm: %v", err))
-			ui.Info("You may need to remove manually: npm uninstall -g openclaw")
-		} else {
-			ui.Success("OpenClaw npm package removed")
-		}
-	}
-
-	// Step 3: Remove launch agents (macOS)
+	// Remove launch agents (macOS)
 	ui.Step(3, "Removing launch agents")
-	if dryRun {
-		ui.Info("[DRY RUN] Would remove OpenClaw launch agents from ~/Library/LaunchAgents/")
+	if removed := uninstall.RemoveLaunchAgents(); len(removed) > 0 {
+		ui.Success(fmt.Sprintf("Removed %d launch agent(s)", len(removed)))
 	} else {
-		removed := uninstall.RemoveLaunchAgents()
-		if len(removed) > 0 {
-			for _, name := range removed {
-				ui.Success(fmt.Sprintf("Removed: %s", name))
-			}
-		} else {
-			ui.Info("No launch agents found")
-		}
+		ui.Info("No launch agents found")
 	}
 
-	// Step 4: Remove data directory
-	ui.Step(4, "Removing OpenClaw data directory")
-	ui.Warn(fmt.Sprintf("This will delete: %s", oc.HomeDir))
-	ui.Info("Your backup is safe — this only removes the live data.")
+	// Remove data
+	ui.Step(4, "Removing data directory")
+	ui.Warn(fmt.Sprintf("About to delete: %s", oc.HomeDir))
 
-	if dryRun {
-		ui.Info(fmt.Sprintf("[DRY RUN] Would remove: %s", oc.HomeDir))
-	} else {
-		if ui.ConfirmDangerous(fmt.Sprintf("Delete %s permanently?", oc.HomeDir)) {
-			if err := uninstall.RemoveData(oc.HomeDir); err != nil {
-				ui.Error(fmt.Sprintf("Could not remove data: %v", err))
-			} else {
-				ui.Success("OpenClaw data directory removed")
-			}
-		} else {
-			ui.Info("Keeping data directory. Remove manually when ready:")
-			ui.Info(fmt.Sprintf("  rm -rf %s", oc.HomeDir))
-		}
+	if !ui.ConfirmDangerous("Delete all OpenClaw data? (backup was created in Phase 2)") {
+		ui.Info("Data directory preserved.")
+		return
 	}
 
-	// Step 5: Verify
+	if err := uninstall.RemoveData(oc.HomeDir); err != nil {
+		ui.Error(fmt.Sprintf("Could not remove data: %v", err))
+	} else {
+		ui.Success("OpenClaw data removed")
+	}
+
+	// Verify
 	ui.Step(5, "Verifying removal")
-	if !dryRun {
-		binGone, dataGone, agentsGone := uninstall.VerifyRemoved()
-		if binGone {
-			ui.Success("Binary: removed")
-		} else {
-			ui.Warn("Binary: still present")
-		}
-		if dataGone {
-			ui.Success("Data: removed")
-		} else {
-			ui.Warn("Data: still present")
-		}
-		if agentsGone {
-			ui.Success("Launch agents: clean")
-		} else {
-			ui.Warn("Launch agents: still present")
-		}
+	binaryGone, dataGone, _ := uninstall.VerifyRemoved()
+	if binaryGone && dataGone {
+		ui.Success("OpenClaw completely removed")
+	} else {
+		ui.Warn("Some traces of OpenClaw may remain")
 	}
-}
-
-// ════════════════════════════════════════════════════════════
-// Help
-// ════════════════════════════════════════════════════════════
-
-func printHelp() {
-	fmt.Println(ui.Bold + "claw-migrate" + ui.Reset + " — Interactive OpenClaw → PicoClaw migration wizard")
-	fmt.Println()
-	fmt.Println(ui.Bold + "USAGE:" + ui.Reset)
-	fmt.Println("  claw-migrate                    Run the full interactive wizard")
-	fmt.Println("  claw-migrate --dry-run           Show what would happen (no changes)")
-	fmt.Println("  claw-migrate --skip-install      Skip PicoClaw installation")
-	fmt.Println("  claw-migrate --skip-uninstall    Skip OpenClaw removal")
-	fmt.Println("  claw-migrate --help              Show this help")
-	fmt.Println("  claw-migrate --version           Show version")
-	fmt.Println()
-	fmt.Println(ui.Bold + "PHASES:" + ui.Reset)
-	fmt.Println("  1. Detect    — Find OpenClaw & PicoClaw installations")
-	fmt.Println("  2. Backup    — Create full backup of ~/.openclaw/")
-	fmt.Println("  3. Install   — Download & install PicoClaw binary")
-	fmt.Println("  4. Migrate   — Copy workspace, convert config, map providers")
-	fmt.Println("  5. Verify    — Test PicoClaw works correctly")
-	fmt.Println("  6. Uninstall — Remove OpenClaw (optional, with confirmation)")
-	fmt.Println()
-	fmt.Println(ui.Bold + "WHAT GETS MIGRATED:" + ui.Reset)
-	fmt.Println("  ✅ Workspace files (SOUL.md, IDENTITY.md, AGENTS.md, USER.md, etc.)")
-	fmt.Println("  ✅ Long-term memory (memory/)")
-	fmt.Println("  ✅ Custom skills (skills/)")
-	fmt.Println("  ✅ Provider API keys (Anthropic, OpenAI, OpenRouter, etc.)")
-	fmt.Println("  ✅ Channel configs (Telegram, Discord, Slack)")
-	fmt.Println("  ✅ Heartbeat settings")
-	fmt.Println("  ⚠️  MCP connections (migrated, manual verification needed)")
-	fmt.Println("  ❌ Session history (incompatible format)")
-	fmt.Println("  ❌ Cron jobs (manual recreation needed)")
-	fmt.Println()
-	fmt.Println(ui.Bold + "REPOSITORY:" + ui.Reset)
-	fmt.Println("  https://github.com/arunbluez/claw-migrate")
-	fmt.Println()
 }

@@ -190,19 +190,50 @@ func convertAgentDefaults(src, dst map[string]interface{}) {
 	}
 	defaults := picoAgent["defaults"].(map[string]interface{})
 
-	// Map known fields (camelCase → snake_case)
+	// Handle model field specially — it can be a string OR an object
+	if model, ok := agent["model"]; ok {
+		switch m := model.(type) {
+		case string:
+			// Already a string — use as-is
+			if m != "" {
+				defaults["model"] = m
+			}
+		case map[string]interface{}:
+			// Object like {"primary": "anthropic/claude-sonnet-4-5"}
+			// Extract the string value from known keys
+			for _, key := range []string{"primary", "name", "model", "default"} {
+				if v, ok := m[key].(string); ok && v != "" {
+					defaults["model"] = v
+					break
+				}
+			}
+		}
+	}
+
+	// Map other known fields (camelCase → snake_case), skip model (handled above)
 	fieldMap := map[string]string{
-		"model":              "model",
-		"max_tokens":         "max_tokens",
-		"maxTokens":          "max_tokens",
-		"temperature":        "temperature",
+		"max_tokens":          "max_tokens",
+		"maxTokens":           "max_tokens",
+		"temperature":         "temperature",
 		"max_tool_iterations": "max_tool_iterations",
-		"maxToolIterations":  "max_tool_iterations",
+		"maxToolIterations":   "max_tool_iterations",
 	}
 
 	for srcKey, dstKey := range fieldMap {
 		if v, ok := agent[srcKey]; ok {
-			defaults[dstKey] = v
+			// Only set numeric values that are non-zero
+			switch val := v.(type) {
+			case float64:
+				if val > 0 {
+					defaults[dstKey] = v
+				}
+			case string:
+				if val != "" {
+					defaults[dstKey] = v
+				}
+			default:
+				defaults[dstKey] = v
+			}
 		}
 	}
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // ANSI color codes
@@ -172,6 +173,30 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 // SpinnerFrame returns the spinner character for a given tick
 func SpinnerFrame(tick int) string {
 	return Cyan + spinnerFrames[tick%len(spinnerFrames)] + Reset
+}
+
+// SpinnerRun runs a function with an animated spinner. Returns the function's error.
+func SpinnerRun(label string, fn func() error) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- fn()
+	}()
+
+	tick := 0
+	ticker := time.NewTicker(80 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case err := <-done:
+			// Clear spinner line and show result
+			fmt.Printf("\r  %-60s\r", "")
+			return err
+		case <-ticker.C:
+			fmt.Printf("\r  %s %s", SpinnerFrame(tick), label)
+			tick++
+		}
+	}
 }
 
 // Divider prints a thin divider

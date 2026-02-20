@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -14,6 +16,14 @@ type Result struct {
 	Size    int64
 	Success bool
 	Error   error
+}
+
+// BackupInfo describes a found backup file
+type BackupInfo struct {
+	Path      string
+	Filename  string
+	Size      int64
+	Timestamp string // extracted from filename
 }
 
 // CreateBackup creates a tar.gz backup of the OpenClaw directory
@@ -48,6 +58,60 @@ func VerifyBackup(backupPath string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("backup verification failed: %w", err)
 	}
+	return nil
+}
+
+// ListBackups finds all openclaw backup files in the home directory
+func ListBackups() []BackupInfo {
+	home, _ := os.UserHomeDir()
+	pattern := filepath.Join(home, "openclaw-backup-*.tar.gz")
+	matches, _ := filepath.Glob(pattern)
+
+	var backups []BackupInfo
+	for _, path := range matches {
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		filename := filepath.Base(path)
+		// Extract timestamp from filename: openclaw-backup-20260220-140013.tar.gz
+		ts := strings.TrimPrefix(filename, "openclaw-backup-")
+		ts = strings.TrimSuffix(ts, ".tar.gz")
+
+		backups = append(backups, BackupInfo{
+			Path:      path,
+			Filename:  filename,
+			Size:      info.Size(),
+			Timestamp: ts,
+		})
+	}
+
+	// Sort newest first
+	sort.Slice(backups, func(i, j int) bool {
+		return backups[i].Timestamp > backups[j].Timestamp
+	})
+
+	return backups
+}
+
+// RestoreBackup extracts a backup archive to restore ~/.openclaw
+func RestoreBackup(backupPath string) error {
+	home, _ := os.UserHomeDir()
+	openclawDir := filepath.Join(home, ".openclaw")
+
+	// Remove existing .openclaw if present
+	if _, err := os.Stat(openclawDir); err == nil {
+		if err := os.RemoveAll(openclawDir); err != nil {
+			return fmt.Errorf("could not remove existing ~/.openclaw: %w", err)
+		}
+	}
+
+	// Extract backup
+	cmd := exec.Command("tar", "-xzf", backupPath, "-C", home)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("restore failed: %w", err)
+	}
+
 	return nil
 }
 
