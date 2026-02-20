@@ -1,13 +1,11 @@
 # 🦞→🦐 claw-migrate
 
-**One-command migration from [OpenClaw](https://github.com/openclaw/openclaw) to [PicoClaw](https://github.com/sipeed/picoclaw)**
+**One-command switch from [OpenClaw](https://github.com/openclaw/openclaw) to [PicoClaw](https://github.com/sipeed/picoclaw) — backup, install, migrate, verify, and uninstall in a single interactive session.**
 
 [![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/arunbluez/claw-migrate)](https://github.com/arunbluez/claw-migrate/releases)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)](go.mod)
-
-An interactive CLI wizard that handles the entire OpenClaw → PicoClaw migration — backup, install, migrate, verify, and uninstall — in a single guided experience.
 
 ```
   ╔═══════════════════════════════════════════════════════════╗
@@ -16,13 +14,48 @@ An interactive CLI wizard that handles the entire OpenClaw → PicoClaw migratio
   ║   OpenClaw → PicoClaw Migration Wizard                    ║
   ║                                                           ║
   ╚═══════════════════════════════════════════════════════════╝
+
+  PHASE 1  Detecting installations
+  ──────────────────────────────────────────────────────
+  ✓ OpenClaw                   ~/.openclaw
+  ✓ Providers                  anthropic, openrouter
+  ✓ Channels                   telegram
+  ✓ Workspace files            6/6 present
+  ✓ Memory                     MEMORY.md (142 lines)
+  ✓ MCP Servers                filesystem, github
+
+  ? Ready to begin migration? [Y/n]
 ```
 
 ## Why?
 
-PicoClaw uses **99% less RAM** (<10MB vs >1GB), boots **400× faster**, and runs on **$10 hardware**. But migrating your carefully curated agent personality, memory, skills, API keys, and channel configs manually is tedious and error-prone.
+PicoClaw uses **99% less RAM** (<10MB vs >1GB), boots **400× faster**, and runs on **$10 hardware**. Switching to it means rebuilding your entire agent setup from scratch — copying workspace files, converting config formats, mapping API keys, setting up channels, recreating cron jobs, and eventually cleaning up the old install.
 
-`claw-migrate` does it all in one interactive session.
+`claw-migrate` turns all of that into one guided session.
+
+## Why not just `picoclaw migrate`?
+
+PicoClaw ships with a [built-in `picoclaw migrate` command](https://github.com/sipeed/picoclaw/pull/33) (since v0.1.1). It's good at the **data transfer step** — copying workspace files and converting config keys. `claw-migrate` actually calls it under the hood when available.
+
+The difference is scope. Here's what each tool covers:
+
+| Step | `picoclaw migrate` | `claw-migrate` |
+|------|:------------------:|:--------------:|
+| Detect & audit OpenClaw setup | — | ✅ |
+| Backup OpenClaw with integrity check | — | ✅ |
+| Download & install PicoClaw | — | ✅ |
+| Run `picoclaw onboard` | — | ✅ |
+| Copy workspace files | ✅ | ✅ |
+| Convert config (camelCase → snake_case) | ✅ | ✅ |
+| Map providers to `model_list` format | — | ✅ |
+| Flag unsupported channels (WhatsApp, Signal) | — | ✅ |
+| Flag items needing manual attention (MCP, cron) | — | ✅ |
+| Verify migration succeeded | — | ✅ |
+| Uninstall OpenClaw (binary + data + launch agents) | — | ✅ |
+| Dry-run mode | ✅ | ✅ |
+| Rollback instructions | — | ✅ |
+
+**TL;DR** — `picoclaw migrate` is the data transfer step. `claw-migrate` is the end-to-end onboarding experience for someone switching platforms. If you already have PicoClaw installed and just want to pull your workspace over, `picoclaw migrate` is all you need.
 
 ## What Gets Migrated
 
@@ -71,7 +104,7 @@ make build
 sudo make install
 ```
 
-> **Zero dependencies** — only requires Go 1.21+ to build. No external packages.
+> **Zero external dependencies** — only requires Go 1.21+ to build.
 
 ## Usage
 
@@ -81,33 +114,35 @@ sudo make install
 claw-migrate
 ```
 
-This walks you through all 6 phases with confirmations at each step:
+The wizard walks you through 6 phases, with confirmations at each step:
 
-1. **Detect** — Finds your OpenClaw installation, lists workspace files, providers, channels
-2. **Backup** — Creates `~/openclaw-backup-YYYYMMDD-HHMMSS.tar.gz`
-3. **Install** — Downloads PicoClaw binary or builds from source
-4. **Migrate** — Copies workspace, converts config, maps API keys
-5. **Verify** — Confirms everything transferred correctly
-6. **Uninstall** — Removes OpenClaw (optional, with double confirmation)
+1. **Detect** — Scans for OpenClaw & PicoClaw, audits workspace files, providers, channels, MCP servers
+2. **Backup** — Creates `~/openclaw-backup-YYYYMMDD-HHMMSS.tar.gz` with integrity verification
+3. **Install** — Downloads PicoClaw binary (or builds from source), runs `picoclaw onboard`
+4. **Migrate** — Copies workspace, converts config, maps API keys (uses `picoclaw migrate` when available)
+5. **Verify** — Confirms everything transferred, prints test commands to try
+6. **Uninstall** — Removes OpenClaw binary, data, and macOS launch agents (optional, double confirmation)
 
-### Dry run (see what would happen)
+### Dry run
 
 ```bash
 claw-migrate --dry-run
 ```
 
+Preview every action without touching the filesystem.
+
 ### Skip specific phases
 
 ```bash
 claw-migrate --skip-install      # Already have PicoClaw installed
-claw-migrate --skip-uninstall    # Keep OpenClaw for now
+claw-migrate --skip-uninstall    # Keep OpenClaw around for now
 ```
 
 ## How It Works
 
 ### Config Conversion
 
-OpenClaw uses a flat TypeScript config with camelCase keys. PicoClaw uses structured Go JSON with snake_case. `claw-migrate` handles the translation:
+OpenClaw uses a flat TypeScript config with camelCase keys. PicoClaw uses structured Go JSON with snake_case and a new `model_list` format. `claw-migrate` handles the translation automatically:
 
 **OpenClaw** (`~/.openclaw/openclaw.json`):
 ```json
@@ -134,46 +169,46 @@ OpenClaw uses a flat TypeScript config with camelCase keys. PicoClaw uses struct
 }
 ```
 
-### Safety Features
+### Safety
 
-- **Full backup first** — tar.gz of entire `~/.openclaw/` before any changes
-- **Backup verification** — integrity check on the backup archive
+- **Full backup first** — `tar.gz` of entire `~/.openclaw/` before any changes
+- **Backup verification** — integrity check on the archive
 - **No silent overwrites** — existing PicoClaw files get `.bak` copies
-- **Double confirmation** — uninstall requires explicit `y` (defaults to `N`)
+- **Double confirmation** — uninstall defaults to `N`, requires explicit `y`
 - **Dry run mode** — preview everything without touching the filesystem
-- **Rollback guide** — printed if anything fails
+- **Rollback instructions** — printed if anything fails
 
 ## Project Structure
 
 ```
 claw-migrate/
-├── main.go                          # Interactive wizard orchestrator
+├── main.go                          # Interactive wizard (6 phases)
 ├── internal/
 │   ├── ui/ui.go                     # Terminal UI (colors, prompts, progress)
-│   ├── detect/detect.go             # Installation detection
+│   ├── detect/detect.go             # Find & audit OpenClaw/PicoClaw installs
 │   ├── backup/backup.go             # Backup creation & verification
 │   ├── install/install.go           # PicoClaw download & install
 │   ├── config/config.go             # Config format conversion
 │   ├── migrate/migrate.go           # Workspace file migration
-│   └── uninstall/uninstall.go       # OpenClaw removal
+│   └── uninstall/uninstall.go       # OpenClaw removal & cleanup
 ├── Makefile                         # Build targets
 ├── .goreleaser.yaml                 # Release automation
 ├── go.mod                           # Go module (zero deps)
 ├── LICENSE                          # MIT
-└── README.md                        # This file
+└── README.md
 ```
 
 ## Contributing
 
-PRs welcome! The codebase is intentionally small (~2K lines across 8 files) and has zero external dependencies.
+PRs welcome! The codebase is ~2K lines across 8 files with zero external dependencies.
 
 ### Areas that need help
 
-- **Testing** — Add unit tests for config conversion edge cases
-- **Windows support** — PowerShell equivalents for backup/uninstall commands
+- **Testing** — Unit tests for config conversion edge cases
+- **Windows support** — PowerShell equivalents for backup/uninstall
 - **More providers** — Expand the provider mapping table for new LLM vendors
-- **Interactive config editor** — Let users edit API keys inline during migration
-- **PicoClaw's built-in migrate** — Better integration with `picoclaw migrate` command
+- **Interactive config editor** — Edit API keys inline during migration
+- **Session history converter** — TypeScript JSON → Go format (hard problem)
 
 ### Development
 
@@ -187,13 +222,10 @@ make build-all    # Cross-compile for all platforms
 
 ## Rollback
 
-If anything goes wrong, restore your OpenClaw backup:
+If anything goes wrong, restore from the backup created in Phase 2:
 
 ```bash
-# Stop PicoClaw
 pkill -f picoclaw
-
-# Restore OpenClaw
 cd ~ && tar -xzf openclaw-backup-*.tar.gz
 npm install -g openclaw@latest
 openclaw gateway
@@ -203,7 +235,7 @@ openclaw gateway
 
 - [PicoClaw](https://github.com/sipeed/picoclaw) — Ultra-lightweight AI assistant in Go
 - [OpenClaw](https://github.com/openclaw/openclaw) — Full-featured AI assistant in TypeScript
-- [`picoclaw migrate`](https://github.com/sipeed/picoclaw/pull/33) — PicoClaw's built-in migration command
+- [`picoclaw migrate`](https://github.com/sipeed/picoclaw/pull/33) — PicoClaw's built-in data transfer command
 
 ## License
 
@@ -211,4 +243,4 @@ MIT — see [LICENSE](LICENSE)
 
 ---
 
-*Built with 🦐 by [Arunkumar](https://github.com/arunbluez) — contributions welcome!*
+*Built for 🦐 by [Arunkumar](https://github.com/arunbluez) — contributions welcome!*
